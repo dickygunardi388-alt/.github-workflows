@@ -62,6 +62,7 @@ jobs:
           else
             echo "⚠ Warning: CONFIG_SUSFS not in defconfig"
           fi
+
       - name: Update/Patch KernelSU-Next
         run: |
           cd $GITHUB_WORKSPACE/kernel_source
@@ -185,6 +186,31 @@ jobs:
               echo "✓ Manual patches attempted"
             fi
           fi
+
+      - name: Integrate Hooks
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          
+          echo ""
+          echo "========================================"
+          echo "Integrating Hooks..."
+          echo "========================================"
+          
+          # Mencari dan mengeksekusi script bash hook jika ada
+          for script in $(find . -maxdepth 2 -iname "*hook*.sh" -type f); do
+            echo "Executing hook script: $script"
+            chmod +x "$script"
+            bash "$script"
+          done
+          
+          # Mencari dan menerapkan file patch hook jika ada
+          for patchfile in $(find . -maxdepth 2 -iname "*hook*.patch" -type f); do
+            echo "Applying hook patch: $patchfile"
+            patch -p1 < "$patchfile" || echo "⚠ Peringatan: Beberapa bagian patch mungkin gagal atau sudah pernah di-apply sebelumnya."
+          done
+          
+          echo "✓ Integrate hooks process finished."
+
       - name: Install Python2
         if: env.ENABLE_PYTHON2 == 'true'
         run: |
@@ -202,6 +228,7 @@ jobs:
           sudo ln -s /usr/bin/python2.7 /usr/local/bin/python2
           rm -rf ~/python2-jammy
           echo "✓ Python2 installed successfully"
+
       - name: Download Clang
         if: env.USE_CLANG == 'true'
         run: |
@@ -218,12 +245,14 @@ jobs:
           echo ""
           echo "Clang version:"
           ./clang/bin/clang --version | head -3
+
       - name: Install System Dependencies
         run: |
           echo "Installing system dependencies..."
           sudo apt-get update
           sudo apt-get install -y lld llvm make bc bison flex libelf-dev libssl-dev binutils gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
           echo "✓ Dependencies installed"
+
       - name: Verify KernelSU-Next and SuSFS Config
         run: |
           cd $GITHUB_WORKSPACE/kernel_source
@@ -283,6 +312,25 @@ jobs:
           fi
           
           echo "✓ defconfig completed"
+          
+          echo ""
+          echo "Adding SuSFS configurations..."
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> out/.config
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> out/.config
+          echo "✓ SuSFS configs added"
+          grep "CONFIG_KSU" out/.config
+          
           echo ""
           echo "Step 2/2: Building kernel..."
           echo "========================================"
@@ -304,6 +352,7 @@ jobs:
             echo "❌ Kernel build failed with status: $BUILD_STATUS"
             exit 1
           fi
+
       - name: Verify Build Output
         if: success()
         run: |
@@ -332,6 +381,7 @@ jobs:
             ls -la out/arch/arm64/boot/ 2>/dev/null || echo "  (directory not found)"
             exit 1
           fi
+
       - name: Upload Kernel Image
         if: success()
         uses: actions/upload-artifact@v4
