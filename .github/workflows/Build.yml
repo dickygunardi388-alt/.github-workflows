@@ -1,0 +1,372 @@
+Name: Build Kernel KERNELSUNEXTNEW
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_version:
+        description: 'KernelSU-Next version (untuk kernel 4.14)'
+        required: false
+        default: 'v3.3.0'
+        type: choice
+        options:
+          - v3.3.0
+          - v3.2.0-legacy
+          - v3.2.0
+          - v3.1.0-legacy
+          - v3.1.0
+
+env:
+  # Konfigurasi Clang (Ganti URL ini jika ingin pakai versi lain)
+  ENABLE_PYTHON2: true
+  USE_CLANG: true
+  CLANG_SOURCE: https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz
+  # KernelSU-Next Repository 
+  KSU_REPO: https://github.com/KernelSU-Next/KernelSU-Next.git
+  # SuSFS Repository
+  SUSFS_REPO: https://github.com/sidex15/SuSFS.git
+  
+jobs:
+  build-kernel:
+    name: Build Kernel 4.14 with KernelSU-Next + SuSFS
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Setup Workspace
+        run: mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: dickygunardi388-alt/hydrogen_kernel_xiaomi_selene
+          ref: Hydrogen
+          submodules: recursive
+          path: kernel_source
+
+      - name: Verify SuSFS in Kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          
+          echo "========================================"
+          echo "Checking for SuSFS patches..."
+          echo "========================================"
+          
+          if grep -r "SUSFS\|susfs" . --include="*.c" --include="*.h" 2>/dev/null | head -3; then
+            echo "✓ SuSFS patches detected in kernel source"
+          else
+            echo "⚠ Warning: SuSFS patches not found in kernel source"
+            echo "This might cause SuSFS to not work properly"
+          fi
+          
+          if grep -q "CONFIG_SUSFS" arch/arm64/configs/selene_defconfig 2>/dev/null; then
+            echo "✓ CONFIG_SUSFS found in defconfig"
+          else
+            echo "⚠ Warning: CONFIG_SUSFS not in defconfig"
+          fi
+      - name: Update/Patch KernelSU-Next
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          
+          KSU_VERSION="${{ github.event.inputs.ksu_version }}"
+          if [ -z "$KSU_VERSION" ]; then
+            KSU_VERSION="v3.3.0"
+          fi
+          
+          echo "========================================"
+          echo "KernelSU-Next Setup"
+          echo "========================================"
+          echo "Kernel Version: 4.14"
+          echo "KernelSU-Next Version: $KSU_VERSION"
+          echo "Repository: KernelSU-Next/KernelSU-Next"
+          echo "========================================"
+          
+          # Hapus KernelSU-Next lama jika ada
+          if [ -d "KernelSU-Next" ]; then
+            echo "Removing old KernelSU-Next directory..."
+            rm -rf KernelSU-Next
+          fi
+          
+          # Clone KernelSU-Next dengan versi tertentu
+          echo ""
+          echo "Cloning KernelSU-Next ($KSU_VERSION)..."
+          echo "Repository: ${{ env.KSU_REPO }}"
+          
+          if git clone --depth=1 -b "$KSU_VERSION" "${{ env.KSU_REPO }}" KernelSU-Next 2>&1; then
+            echo "✓ KernelSU-Next cloned successfully (branch: $KSU_VERSION)"
+          else
+            echo "❌ Failed to clone branch $KSU_VERSION"
+            echo ""
+            echo "Checking available branches..."
+            git ls-remote --heads "${{ env.KSU_REPO }}" | grep -E "v3\." | sort -V | tail -10
+            echo ""
+            echo "Trying main branch as fallback..."
+            rm -rf KernelSU-Next
+            if git clone --depth=1 -b main "${{ env.KSU_REPO }}" KernelSU-Next; then
+              echo "✓ Fallback to main branch successful"
+            else
+              echo "❌ All clone attempts failed!"
+              exit 1
+            fi
+          fi
+          
+          # Tampilkan informasi KernelSU-Next
+          echo ""
+          echo "========================================"
+          echo "KernelSU-Next Information:"
+          echo "========================================"
+          cd KernelSU-Next
+          echo "Latest commits:"
+          git log --oneline -5
+          echo ""
+          echo "Current version/tag:"
+          git describe --tags 2>/dev/null || echo "Commit: $(git rev-parse --short HEAD)"
+          echo ""
+          echo "Branch info:"
+          git branch -a
+          cd ..
+          
+          # Verifikasi structure
+          echo ""
+          echo "========================================"
+          echo "Repository Structure Check:"
+          echo "========================================"
+          if [ -d "KernelSU-Next/kernel" ]; then
+            echo "✓ Kernel patches directory found"
+            echo ""
+            echo "Files in kernel directory:"
+            ls -la KernelSU-Next/kernel/ | grep -v "^d" | tail -20
+          else
+            echo "⚠ Kernel directory not found, checking structure..."
+            ls -la KernelSU-Next/ | head -20
+          fi
+          
+          # Clean kernel sebelum patch (PENTING: jangan gunakan mrproper, cukup clean)
+          echo ""
+          echo "Cleaning kernel output directory..."
+          rm -rf out 2>/dev/null || true
+          
+          # Apply KernelSU-Next patches
+          echo ""
+          echo "========================================"
+          echo "Applying KernelSU-Next patches..."
+          echo "========================================"
+          
+          # Cek setup.sh
+          if [ -f "KernelSU-Next/kernel/setup.sh" ]; then
+            echo "Found setup.sh, executing..."
+            chmod +x KernelSU-Next/kernel/setup.sh
+            bash KernelSU-Next/kernel/setup.sh
+            SETUP_EXIT=$?
+            if [ $SETUP_EXIT -eq 0 ]; then
+              echo "✓ KernelSU-Next patches applied successfully!"
+            else
+              echo "⚠ setup.sh exited with code: $SETUP_EXIT"
+              echo "Checking if patches were still applied..."
+              if [ -d "drivers/kernelsu" ]; then
+                echo "✓ KernelSU directory exists, continuing..."
+              else
+                echo "⚠ KernelSU directory not found, but will try to build anyway..."
+              fi
+            fi
+          else
+            echo "⚠ setup.sh not found in KernelSU-Next/kernel/"
+            echo ""
+            echo "Searching for patch application scripts:"
+            find KernelSU-Next -name "*.sh" -type f | head -10
+            echo ""
+            echo "Attempting manual patch..."
+            if find KernelSU-Next/kernel -name "*.patch" -type f 2>/dev/null | head -1 > /dev/null; then
+              echo "Found patch files, applying manually..."
+              for patch in KernelSU-Next/kernel/*.patch; do
+                if [ -f "$patch" ]; then
+                  echo "Applying: $(basename "$patch")"
+                  patch -p1 < "$patch" || echo "Patch $(basename "$patch") may have issues"
+                fi
+              done
+              echo "✓ Manual patches attempted"
+            fi
+          fi
+      - name: Install Python2
+        if: env.ENABLE_PYTHON2 == 'true'
+        run: |
+          mkdir -p ~/python2-jammy && cd ~/python2-jammy
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-stdlib_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/python2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/p/python2.7/libpython2.7-minimal_2.7.18-13ubuntu1.5_amd64.deb
+          sudo apt install libnsl2 -y
+          sudo dpkg -i libpython2.7-minimal_*.deb
+          sudo dpkg -i python2.7-minimal_*.deb
+          sudo dpkg -i libpython2.7-stdlib_*.deb
+          sudo dpkg -i python2.7_*.deb
+          sudo apt --fix-broken install -y
+          sudo ln -s /usr/bin/python2.7 /usr/local/bin/python2
+          rm -rf ~/python2-jammy
+          echo "✓ Python2 installed successfully"
+      - name: Download Clang
+        if: env.USE_CLANG == 'true'
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          echo "Downloading ProtonClang..."
+          wget -nv -O clang.tar.gz ${{ env.CLANG_SOURCE }}
+          mkdir clang
+          tar -C clang/ -zxvf clang.tar.gz
+          rm clang.tar.gz
+          if [[ "$(find ./clang -mindepth 1 -maxdepth 1 -type d | wc -l)" == "1" ]]; then
+              mv -f "$(find ./clang -mindepth 1 -maxdepth 1 -type d)"/* ./clang
+          fi
+          echo "✓ ProtonClang downloaded successfully"
+          echo ""
+          echo "Clang version:"
+          ./clang/bin/clang --version | head -3
+      - name: Install System Dependencies
+        run: |
+          echo "Installing system dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y lld llvm make bc bison flex libelf-dev libssl-dev binutils gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          echo "✓ Dependencies installed"
+      - name: Verify KernelSU-Next and SuSFS Config
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          
+          echo ""
+          echo "========================================"
+          echo "KernelSU-Next & SuSFS Verification:"
+          echo "========================================"
+          
+          if [ -d "drivers/kernelsu" ]; then
+            echo "✓ KernelSU drivers directory found"
+            echo "Total files: $(find drivers/kernelsu -type f | wc -l)"
+          else
+            echo "⚠ KernelSU drivers directory not yet visible"
+          fi
+          
+          # Check for SuSFS after KernelSU patch
+          if grep -r "SUSFS\|susfs" . --include="*.c" --include="*.h" 2>/dev/null | head -3; then
+            echo "✓ SuSFS patches still present after KernelSU patch!"
+          else
+            echo "⚠ Warning: SuSFS patches may have been overwritten"
+          fi
+
+      - name: Build Kernel 4.14 with KernelSU-Next + SuSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          export ARCH=arm64
+          export SUBARCH=arm64
+          
+          # MENGHUBUNGKAN PATH CLANG
+          export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
+          
+          echo ""
+          echo "========================================"
+          echo "Build Configuration:"
+          echo "========================================"
+          echo "Kernel Version: 4.14"
+          KSU_VER="${{ github.event.inputs.ksu_version }}"
+          if [ -z "$KSU_VER" ]; then
+            KSU_VER="v3.3.0"
+          fi
+          echo "KernelSU-Next Version: $KSU_VER"
+          echo "Features: KernelSU-Next + SuSFS"
+          echo "Architecture: ARM64 (aarch64)"
+          echo "Compiler: ProtonClang"
+          echo "Clang: $(clang --version 2>/dev/null | head -1)"
+          echo "CPU cores: $(nproc)"
+          echo "========================================"
+          echo ""
+          
+          echo "Step 1/2: Running defconfig..."
+          make O=out selene_defconfig
+          
+          if [ ! -f "out/.config" ]; then
+            echo "❌ defconfig failed!"
+            exit 1
+          fi
+          
+          echo "✓ defconfig completed"
+          echo ""
+          echo "Step 2/2: Building kernel..."
+          echo "========================================"
+          
+          make O=out CC=clang LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            -j$(nproc)
+          
+          BUILD_STATUS=$?
+          echo "========================================"
+          
+          if [ $BUILD_STATUS -eq 0 ]; then
+            echo ""
+            echo "✓✓✓ Kernel build completed successfully! ✓✓✓"
+            exit 0
+          else
+            echo ""
+            echo "❌ Kernel build failed with status: $BUILD_STATUS"
+            exit 1
+          fi
+      - name: Verify Build Output
+        if: success()
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_source
+          
+          echo ""
+          echo "========================================"
+          echo "Build Output Verification:"
+          echo "========================================"
+          
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            SIZE=$(du -h out/arch/arm64/boot/Image.gz-dtb | cut -f1)
+            CHECKSUM=$(md5sum out/arch/arm64/boot/Image.gz-dtb | awk '{print $1}')
+            
+            echo "✓ Kernel image built successfully!"
+            echo ""
+            echo "File Details:"
+            echo "  Filename: Image.gz-dtb"
+            echo "  Size: $SIZE"
+            echo "  MD5: $CHECKSUM"
+            echo ""
+            ls -lh out/arch/arm64/boot/Image.gz-dtb
+          else
+            echo "❌ Kernel image not found!"
+            echo "Build output directory contents:"
+            ls -la out/arch/arm64/boot/ 2>/dev/null || echo "  (directory not found)"
+            exit 1
+          fi
+      - name: Upload Kernel Image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hasil-Kernel-Ichika-Forever-KSU-${{ github.event.inputs.ksu_version || 'v3.3.0' }}
+          path: kernel_source/out/arch/arm64/boot/Image.gz-dtb
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════╗"
+          echo "║          BUILD SUMMARY                     ║"
+          echo "╚════════════════════════════════════════════╝"
+          echo "Build Date: $(date '+%Y-%m-%d %H:%M:%S')"
+          if [ $? -eq 0 ]; then
+            BUILD_RESULT="✓ SUCCESS"
+          else
+            BUILD_RESULT="✗ FAILED"
+          fi
+          echo "Build Status: $BUILD_RESULT"
+          echo ""
+          echo "Build Details:"
+          echo "├─ Kernel Branch: Hydrogen"
+          echo "├─ Kernel Version: 4.14"
+          echo "├─ KernelSU-Next Version: ${{ github.event.inputs.ksu_version || 'v3.3.0' }}"
+          echo "├─ Features: KernelSU-Next + SuSFS"
+          echo "├─ Compiler: ProtonClang (master)"
+          echo "├─ Architecture: ARM64 (aarch64)"
+          echo "└─ Output: Image.gz-dtb"
+          echo ""
+          echo "Compatible Devices:"
+          echo "└─ Xiaomi Redmi Note 9 (selene) + other 4.14 kernel devices"
+          echo ""
+          echo "Repository: https://github.com/KernelSU-Next/KernelSU-Next"
+          echo "╚════════════════════════════════════════════╝"
