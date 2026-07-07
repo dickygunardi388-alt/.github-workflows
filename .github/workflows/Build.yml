@@ -1,4 +1,4 @@
-Name: Build Kernel KERNELSUNEXTNEW
+name: Build Kernel KERNELSUNEXTNEW
 
 on:
   workflow_dispatch:
